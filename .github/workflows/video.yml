@@ -1,0 +1,310 @@
+name: Finance Video Bot
+
+on:
+  schedule:
+    - cron: "0 1 * * *"    # long  -> 12:00 PM BDT slot (starts 5h early)
+    - cron: "0 10 * * *"   # short -> 6:00 PM BDT slot (starts 2h early)
+    - cron: "0 13 * * *"   # long  -> 12:00 AM BDT slot (starts 5h early)
+    - cron: "0 22 * * *"   # short -> 6:00 AM BDT slot (starts 2h early)
+  workflow_dispatch:
+    inputs:
+      video_type:
+        description: "long or short"
+        default: "short"
+        type: choice
+        options: [short, long]
+      dry_run:
+        description: "Dry run: tiny test video, NO upload, NO topic reservation (video comes as artifact)"
+        default: false
+        type: boolean
+      rss_images:
+        description: "Use photos from RSS/article pages (publisher copyright risk). Untick = only openly licensed photos"
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+  RSS_IMAGES: ${{ github.event.inputs.rss_images == 'false' && '0' || '1' }}
+  PYTHONUNBUFFERED: "1"
+
+concurrency:
+  group: vb-${{ github.event.schedule || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    outputs:
+      mode: ${{ steps.t.outputs.type }}
+      shards: ${{ steps.pub.outputs.shards }}
+      tag: ${{ steps.pub.outputs.tag }}
+      skip: ${{ steps.chk.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Fix stray leading spaces in pasted files
+        run: |
+          python - <<'PY'
+          import glob,textwrap
+          for f in glob.glob("*.py"):
+              s=open(f,encoding="utf-8").read()
+              L=textwrap.dedent(s.lstrip("\ufeff")).split("\n")
+              for i,l in enumerate(L):
+                  if l.strip():
+                      L[i]=l.lstrip()
+                      break
+              d="\n".join(L)
+              if d!=s:
+                  open(f,"w",encoding="utf-8").write(d)
+                  print("fixed",f)
+          PY
+
+      - name: Syntax check all Python files
+        run: python -m compileall -q $(ls *.py)
+
+      - name: Decide video type
+        id: t
+        run: |
+          S="${{ github.event.schedule }}"
+          case "$S" in
+            "0 1 * * *"|"0 13 * * *") T=long ;;
+            "0 10 * * *"|"0 22 * * *") T=short ;;
+            *) T="${{ github.event.inputs.video_type }}" ;;
+          esac
+          [ -z "$T" ] && T=short
+          echo "type=$T" >> $GITHUB_OUTPUT
+          echo "VIDEO TYPE: $T  DRY_RUN: $DRY_RUN  RSS_IMAGES: $RSS_IMAGES"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost || true
+          df -h /
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libsndfile1 cmake ninja-build build-essential
+
+      - name: Cache models
+        uses: actions/cache@v4
+        with:
+          path: |
+            models
+            voices
+          key: assets-v5
+
+      - name: Download voice + script model (one time)
+        run: |
+          mkdir -p voices models
+          V=https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high
+          [ -f voices/en_US-ryan-high.onnx ] || curl -L -o voices/en_US-ryan-high.onnx $V/en_US-ryan-high.onnx
+          [ -f voices/en_US-ryan-high.onnx.json ] || curl -L -o voices/en_US-ryan-high.onnx.json $V/en_US-ryan-high.onnx.json
+          M=https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf
+          [ -f models/qwen2.5-3b-instruct-q4_k_m.gguf ] || curl -L -o models/qwen2.5-3b-instruct-q4_k_m.gguf $M
+          ls -la models voices
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Build llama.cpp for THIS runner CPU (generic rebuild only on a real crash)
+        run: |
+          export CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)
+          cat > /tmp/lt.py <<'PY'
+          from llama_cpp import Llama
+          m=Llama(model_path="models/qwen2.5-3b-instruct-q4_k_m.gguf",n_ctx=512,n_threads=2,verbose=False)
+          o=m.create_chat_completion(messages=[{"role":"user","content":"Say hello."}],max_tokens=4)
+          print("llama OK:",o["choices"][0]["message"]["content"])
+          PY
+          pip install --no-cache-dir --no-binary llama-cpp-python llama-cpp-python
+          set +e
+          python -X faulthandler /tmp/lt.py
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "llama test passed (native build)"
+          elif [ "$rc" -ge 128 ]; then
+            echo "=== crashed (exit $rc) -> rebuilding with generic x86-64 flags ==="
+            CMAKE_ARGS="-DGGML_NATIVE=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_AVX512=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF" \
+              pip install --force-reinstall --no-cache-dir --no-binary llama-cpp-python llama-cpp-python
+            python -X faulthandler /tmp/lt.py
+          else
+            echo "=== llama test failed with a normal error (exit $rc). See above. ==="
+            exit $rc
+          fi
+
+      - name: Prepare (topic, script, voice, music, photos, shot plan)
+        env:
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          YT_CHANNEL_ID: ${{ secrets.YT_CHANNEL_ID }}
+          VIDEO_TYPE: ${{ steps.t.outputs.type }}
+          WIKI_CONTACT: https://github.com/${{ github.repository }}
+        run: python -X faulthandler prepare.py
+
+      - name: Check skip
+        id: chk
+        run: |
+          if [ -f build/skip ]; then echo "skip=true" >> $GITHUB_OUTPUT; cat build/skip; else echo "skip=false" >> $GITHUB_OUTPUT; fi
+
+      - name: Publish build data to a temporary release
+        id: pub
+        if: ${{ steps.chk.outputs.skip != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for t in $(gh release list --limit 100 --json tagName,createdAt -q '.[] | select(.tagName|startswith("build-")) | select((.createdAt|fromdateiso8601) < (now-259200)) | .tagName'); do
+            gh release delete "$t" --cleanup-tag -y || true
+          done
+          echo "shards=$(cat build/shards.json)" >> $GITHUB_OUTPUT
+          TAG="build-${{ github.run_id }}-${{ github.run_attempt }}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          gh release create "$TAG" --title "$TAG" --notes "temporary render data" --prerelease --target "$GITHUB_SHA"
+          gh release upload "$TAG" build/plan.json build/mix.flac build/meta.json build/topic.json build/captions.srt build/images.tar --clobber
+
+  render:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Fix stray leading spaces in pasted files
+        run: |
+          python - <<'PY'
+          import glob,textwrap
+          for f in glob.glob("*.py"):
+              s=open(f,encoding="utf-8").read()
+              L=textwrap.dedent(s.lstrip("\ufeff")).split("\n")
+              for i,l in enumerate(L):
+                  if l.strip():
+                      L[i]=l.lstrip()
+                      break
+              d="\n".join(L)
+              if d!=s:
+                  open(f,"w",encoding="utf-8").write(d)
+          PY
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-liberation fonts-dejavu-core libcairo2-dev pkg-config python3-dev
+
+      - name: Python deps
+        run: pip install pycairo pillow numpy
+
+      - name: Download plan and photos
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release download "${{ needs.prepare.outputs.tag }}" --pattern plan.json --pattern images.tar --dir build --clobber
+          mkdir -p build/images
+          tar -xf build/images.tar -C build/images
+          ls build/images | head -n 60
+
+      - name: Render shard ${{ matrix.shard }}
+        env:
+          VIDEO_TYPE: ${{ needs.prepare.outputs.mode }}
+        run: python -X faulthandler render_shard.py ${{ matrix.shard }}
+
+      - name: Upload segment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -la build
+          gh release upload "${{ needs.prepare.outputs.tag }}" build/seg_*.mp4 --clobber
+
+  assemble:
+    needs: [prepare, render]
+    if: ${{ always() && needs.prepare.result == 'success' && needs.prepare.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Fix stray leading spaces in pasted files
+        run: |
+          python - <<'PY'
+          import glob,textwrap
+          for f in glob.glob("*.py"):
+              s=open(f,encoding="utf-8").read()
+              L=textwrap.dedent(s.lstrip("\ufeff")).split("\n")
+              for i,l in enumerate(L):
+                  if l.strip():
+                      L[i]=l.lstrip()
+                      break
+              d="\n".join(L)
+              if d!=s:
+                  open(f,"w",encoding="utf-8").write(d)
+          PY
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-liberation fonts-dejavu-core libcairo2-dev pkg-config python3-dev
+
+      - name: Python deps
+        run: pip install pycairo pillow numpy google-api-python-client google-auth google-auth-httplib2
+
+      - name: Download all build data
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release download "${{ needs.prepare.outputs.tag }}" --dir build --clobber
+          mkdir -p build/images
+          tar -xf build/images.tar -C build/images
+
+      - name: Assemble 4K video, thumbnail, upload
+        env:
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          YT_CHANNEL_ID: ${{ secrets.YT_CHANNEL_ID }}
+          VIDEO_TYPE: ${{ needs.prepare.outputs.mode }}
+          WAIT_FOR_SLOT: ${{ github.event_name == 'schedule' && '1' || '0' }}
+          LOCAL_UTC_OFFSET: "6"
+        run: python -X faulthandler assemble.py
+
+      - name: Dry-run artifact
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dry-run-video
+          path: |
+            output/video.mp4
+            output/thumb.jpg
+          retention-days: 3
+
+      - name: Delete temporary release (only after success)
+        if: ${{ success() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release delete "${{ needs.prepare.outputs.tag }}" --cleanup-tag -y || true
