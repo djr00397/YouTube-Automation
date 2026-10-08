@@ -1,0 +1,6 @@
+work/
+output/
+build/
+voices/
+models/
+__pycache__/
