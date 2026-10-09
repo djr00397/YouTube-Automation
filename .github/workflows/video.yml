@@ -54,19 +54,39 @@ jobs:
       - name: Fix stray spaces in pasted files
         run: |
           python - <<'PY'
-          import glob
+          import glob,re
+          def ind(l):
+              return len(l)-len(l.lstrip(" "))
           for f in sorted(glob.glob("*.py")):
               raw=open(f,encoding="utf-8").read()
               s=raw.lstrip("\ufeff").replace("\r","").replace("\t","    ")
-              out=[]
-              for l in s.split("\n"):
-                  t=l.lstrip(" ")
-                  out.append(" "*((len(l)-len(t)+2)//4*4)+t if t else "")
-              for i,l in enumerate(out):
+              L=[(" "*((ind(l)+2)//4*4)+l.lstrip(" ")) if l.strip() else "" for l in s.split("\n")]
+              for i,l in enumerate(L):
                   if l.strip():
-                      out[i]=l.lstrip()
+                      L[i]=l.lstrip()
                       break
-              d="\n".join(out)
+              for _ in range(20):
+                  try:
+                      compile("\n".join(L),f,"exec")
+                      break
+                  except IndentationError as e:
+                      m=re.search(r"on line (\d+)",e.msg or "")
+                      if not m:
+                          break
+                      k=int(m.group(1))-1
+                      j=k+1
+                      while j<len(L) and not L[j].strip():
+                          j+=1
+                      if j>=len(L):
+                          break
+                      new=max(0,ind(L[j])-4)
+                      if ind(L[k])==new:
+                          break
+                      L[k]=" "*new+L[k].lstrip()
+                      print("repaired indent of line",k+1,"in",f)
+                  except SyntaxError:
+                      break
+              d="\n".join(L)
               if d!=raw:
                   open(f,"w",encoding="utf-8").write(d)
                   print("normalized",f)
@@ -215,19 +235,39 @@ jobs:
       - name: Fix stray spaces in pasted files
         run: |
           python - <<'PY'
-          import glob
+          import glob,re
+          def ind(l):
+              return len(l)-len(l.lstrip(" "))
           for f in sorted(glob.glob("*.py")):
               raw=open(f,encoding="utf-8").read()
               s=raw.lstrip("\ufeff").replace("\r","").replace("\t","    ")
-              out=[]
-              for l in s.split("\n"):
-                  t=l.lstrip(" ")
-                  out.append(" "*((len(l)-len(t)+2)//4*4)+t if t else "")
-              for i,l in enumerate(out):
+              L=[(" "*((ind(l)+2)//4*4)+l.lstrip(" ")) if l.strip() else "" for l in s.split("\n")]
+              for i,l in enumerate(L):
                   if l.strip():
-                      out[i]=l.lstrip()
+                      L[i]=l.lstrip()
                       break
-              d="\n".join(out)
+              for _ in range(20):
+                  try:
+                      compile("\n".join(L),f,"exec")
+                      break
+                  except IndentationError as e:
+                      m=re.search(r"on line (\d+)",e.msg or "")
+                      if not m:
+                          break
+                      k=int(m.group(1))-1
+                      j=k+1
+                      while j<len(L) and not L[j].strip():
+                          j+=1
+                      if j>=len(L):
+                          break
+                      new=max(0,ind(L[j])-4)
+                      if ind(L[k])==new:
+                          break
+                      L[k]=" "*new+L[k].lstrip()
+                      print("repaired indent of line",k+1,"in",f)
+                  except SyntaxError:
+                      break
+              d="\n".join(L)
               if d!=raw:
                   open(f,"w",encoding="utf-8").write(d)
                   print("normalized",f)
@@ -279,19 +319,39 @@ jobs:
       - name: Fix stray spaces in pasted files
         run: |
           python - <<'PY'
-          import glob
+          import glob,re
+          def ind(l):
+              return len(l)-len(l.lstrip(" "))
           for f in sorted(glob.glob("*.py")):
               raw=open(f,encoding="utf-8").read()
               s=raw.lstrip("\ufeff").replace("\r","").replace("\t","    ")
-              out=[]
-              for l in s.split("\n"):
-                  t=l.lstrip(" ")
-                  out.append(" "*((len(l)-len(t)+2)//4*4)+t if t else "")
-              for i,l in enumerate(out):
+              L=[(" "*((ind(l)+2)//4*4)+l.lstrip(" ")) if l.strip() else "" for l in s.split("\n")]
+              for i,l in enumerate(L):
                   if l.strip():
-                      out[i]=l.lstrip()
+                      L[i]=l.lstrip()
                       break
-              d="\n".join(out)
+              for _ in range(20):
+                  try:
+                      compile("\n".join(L),f,"exec")
+                      break
+                  except IndentationError as e:
+                      m=re.search(r"on line (\d+)",e.msg or "")
+                      if not m:
+                          break
+                      k=int(m.group(1))-1
+                      j=k+1
+                      while j<len(L) and not L[j].strip():
+                          j+=1
+                      if j>=len(L):
+                          break
+                      new=max(0,ind(L[j])-4)
+                      if ind(L[k])==new:
+                          break
+                      L[k]=" "*new+L[k].lstrip()
+                      print("repaired indent of line",k+1,"in",f)
+                  except SyntaxError:
+                      break
+              d="\n".join(L)
               if d!=raw:
                   open(f,"w",encoding="utf-8").write(d)
                   print("normalized",f)
