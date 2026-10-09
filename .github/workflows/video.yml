@@ -51,25 +51,48 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Fix stray leading spaces in pasted files
+      - name: Fix stray spaces in pasted files
         run: |
           python - <<'PY'
-          import glob,textwrap
-          for f in glob.glob("*.py"):
-              s=open(f,encoding="utf-8").read()
-              L=textwrap.dedent(s.lstrip("\ufeff")).split("\n")
-              for i,l in enumerate(L):
+          import glob
+          for f in sorted(glob.glob("*.py")):
+              raw=open(f,encoding="utf-8").read()
+              s=raw.lstrip("\ufeff").replace("\r","").replace("\t","    ")
+              out=[]
+              for l in s.split("\n"):
+                  t=l.lstrip(" ")
+                  out.append(" "*((len(l)-len(t)+2)//4*4)+t if t else "")
+              for i,l in enumerate(out):
                   if l.strip():
-                      L[i]=l.lstrip()
+                      out[i]=l.lstrip()
                       break
-              d="\n".join(L)
-              if d!=s:
+              d="\n".join(out)
+              if d!=raw:
                   open(f,"w",encoding="utf-8").write(d)
-                  print("fixed",f)
+                  print("normalized",f)
+          print("indentation normalization done")
           PY
 
-      - name: Syntax check all Python files
-        run: python -m compileall -q $(ls *.py)
+      - name: Syntax check all Python files (prints the exact bad lines)
+        run: |
+          python - <<'PY'
+          import glob,sys
+          bad=0
+          for f in sorted(glob.glob("*.py")):
+              src=open(f,encoding="utf-8").read()
+              try:
+                  compile(src,f,"exec")
+              except SyntaxError as e:
+                  bad=1
+                  n=e.lineno or 1
+                  print(f"SYNTAX ERROR in {f}, line {n}: {e.msg}")
+                  L=src.split("\n")
+                  for i in range(max(0,n-6),min(len(L),n+4)):
+                      print(f"{i+1:5d} |{L[i]!r}")
+          if bad:
+              sys.exit(1)
+          print("all python files compile")
+          PY
 
       - name: Decide video type
         id: t
@@ -189,20 +212,25 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Fix stray leading spaces in pasted files
+      - name: Fix stray spaces in pasted files
         run: |
           python - <<'PY'
-          import glob,textwrap
-          for f in glob.glob("*.py"):
-              s=open(f,encoding="utf-8").read()
-              L=textwrap.dedent(s.lstrip("\ufeff")).split("\n")
-              for i,l in enumerate(L):
+          import glob
+          for f in sorted(glob.glob("*.py")):
+              raw=open(f,encoding="utf-8").read()
+              s=raw.lstrip("\ufeff").replace("\r","").replace("\t","    ")
+              out=[]
+              for l in s.split("\n"):
+                  t=l.lstrip(" ")
+                  out.append(" "*((len(l)-len(t)+2)//4*4)+t if t else "")
+              for i,l in enumerate(out):
                   if l.strip():
-                      L[i]=l.lstrip()
+                      out[i]=l.lstrip()
                       break
-              d="\n".join(L)
-              if d!=s:
+              d="\n".join(out)
+              if d!=raw:
                   open(f,"w",encoding="utf-8").write(d)
+                  print("normalized",f)
           PY
 
       - name: System packages
@@ -248,20 +276,25 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Fix stray leading spaces in pasted files
+      - name: Fix stray spaces in pasted files
         run: |
           python - <<'PY'
-          import glob,textwrap
-          for f in glob.glob("*.py"):
-              s=open(f,encoding="utf-8").read()
-              L=textwrap.dedent(s.lstrip("\ufeff")).split("\n")
-              for i,l in enumerate(L):
+          import glob
+          for f in sorted(glob.glob("*.py")):
+              raw=open(f,encoding="utf-8").read()
+              s=raw.lstrip("\ufeff").replace("\r","").replace("\t","    ")
+              out=[]
+              for l in s.split("\n"):
+                  t=l.lstrip(" ")
+                  out.append(" "*((len(l)-len(t)+2)//4*4)+t if t else "")
+              for i,l in enumerate(out):
                   if l.strip():
-                      L[i]=l.lstrip()
+                      out[i]=l.lstrip()
                       break
-              d="\n".join(L)
-              if d!=s:
+              d="\n".join(out)
+              if d!=raw:
                   open(f,"w",encoding="utf-8").write(d)
+                  print("normalized",f)
           PY
 
       - name: System packages
